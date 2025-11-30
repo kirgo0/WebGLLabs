@@ -1,10 +1,15 @@
 'use strict';
 
 let gl;                 // WebGL context
-let surface;            // Surface model (parabolic humming-top)
+let surface;            // Surface model
 let shProgram;          // Shader program
 let spaceball;          // Trackball rotator
 let currentTime = 0.0;  // For rotating light
+
+// Textures
+let diffuseTex = null;
+let normalTex = null;
+let specularTex = null;
 
 function deg2rad(angle) {
     return angle * Math.PI / 180;
@@ -20,22 +25,27 @@ function transformPoint(m, p) {
     ];
 }
 
-/*======================  MODEL – TRIANGLES WITH INDICES  ======================*/
+/*======================  MODEL – TRIANGLES WITH INDICES & TANGENTS  ======================*/
 
 function Model(name) {
     this.name = name;
 
-    this.vbo = gl.createBuffer(); // vertex positions
-    this.nbo = gl.createBuffer(); // vertex normals
-    this.ibo = gl.createBuffer(); // indices
+    this.vbo = gl.createBuffer();      // vertex positions
+    this.nbo = gl.createBuffer();      // vertex normals
+    this.tbo = gl.createBuffer();      // tangent vectors
+    this.uvbo = gl.createBuffer();     // texture coordinates
+    this.ibo = gl.createBuffer();      // indices
+
     this.indexCount = 0;
 
     /**
-     * vertices: flat [x,y,z,...]
-     * normals:  flat [nx,ny,nz,...]
-     * indices:  flat [i0,i1,i2,...] (Uint16)
+     * vertices:  [x,y,z,...]
+     * normals:   [nx,ny,nz,...]
+     * tangents:  [tx,ty,tz,...]
+     * texCoords: [u,v,...]
+     * indices:   [i0,i1,i2,...]
      */
-    this.BufferData = function (vertices, normals, indices) {
+    this.BufferData = function (vertices, normals, tangents, texCoords, indices) {
         this.indexCount = indices.length;
 
         // Positions
@@ -46,23 +56,41 @@ function Model(name) {
         gl.bindBuffer(gl.ARRAY_BUFFER, this.nbo);
         gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
 
+        // Tangents
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.tbo);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(tangents), gl.STATIC_DRAW);
+
+        // Texture coordinates
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.uvbo);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(texCoords), gl.STATIC_DRAW);
+
         // Indices
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.ibo);
         gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
     };
 
     this.Draw = function () {
-        // Bind positions
+        // Positions
         gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);
         gl.vertexAttribPointer(shProgram.iAttribVertex, 3, gl.FLOAT, false, 0, 0);
         gl.enableVertexAttribArray(shProgram.iAttribVertex);
 
-        // Bind normals
+        // Normals
         gl.bindBuffer(gl.ARRAY_BUFFER, this.nbo);
         gl.vertexAttribPointer(shProgram.iAttribNormal, 3, gl.FLOAT, false, 0, 0);
         gl.enableVertexAttribArray(shProgram.iAttribNormal);
 
-        // Bind indices and draw
+        // Tangents
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.tbo);
+        gl.vertexAttribPointer(shProgram.iAttribTangent, 3, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(shProgram.iAttribTangent);
+
+        // TexCoords
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.uvbo);
+        gl.vertexAttribPointer(shProgram.iAttribTexCoord, 2, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(shProgram.iAttribTexCoord);
+
+        // Indices
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.ibo);
         gl.drawElements(gl.TRIANGLES, this.indexCount, gl.UNSIGNED_SHORT, 0);
     };
@@ -71,21 +99,26 @@ function Model(name) {
 /*======================  SHADER PROGRAM WRAPPER  ======================*/
 
 function ShaderProgram(name, program) {
-
     this.name = name;
     this.prog = program;
 
-    this.iAttribVertex = -1;
-    this.iAttribNormal = -1;
+    this.iAttribVertex    = -1;
+    this.iAttribNormal    = -1;
+    this.iAttribTexCoord  = -1;
+    this.iAttribTangent   = -1;
 
     this.iModelViewMatrix = -1;
     this.iProjectionMatrix = -1;
 
-    this.iLightPos = -1;
-    this.iAmbientColor = -1;
-    this.iDiffuseColor = -1;
+    this.iLightPos      = -1;
+    this.iAmbientColor  = -1;
+    this.iDiffuseColor  = -1;
     this.iSpecularColor = -1;
-    this.iShininess = -1;
+    this.iShininess     = -1;
+
+    this.iDiffuseMap  = -1;
+    this.iNormalMap   = -1;
+    this.iSpecularMap = -1;
 
     this.Use = function () {
         gl.useProgram(this.prog);
@@ -95,7 +128,7 @@ function ShaderProgram(name, program) {
 /*======================  PARABOLIC HUMMING-TOP GEOMETRY  ======================*/
 
 // parametric surface: (y is vertical axis)
-// y ∈ [-h, h],  beta ∈ [0, 2π]
+// y ∈ [-h, h], beta ∈ [0, 2π]
 function parabolicHummingTopVertex(y, beta, h, p) {
     let rBase = Math.abs(y) - h;          // |y| - h
     let r = (rBase * rBase) / (2 * p);    // (|y| - h)^2 / (2p)
@@ -108,22 +141,23 @@ function parabolicHummingTopVertex(y, beta, h, p) {
 
 /**
  * Create surface mesh data for given U/V granularity.
- * uSeg: number of segments along angle (U)
- * vSeg: number of segments along vertical (V)
+ * uSeg: segments along angle (U)
+ * vSeg: segments along vertical (V)
  *
- * Returns { positions, normals, indices }
+ * Returns { positions, normals, tangents, texCoords, indices }
  */
 function CreateSurfaceData(uSeg, vSeg) {
-    // defaults if not provided
     uSeg = uSeg || 40;
     vSeg = vSeg || 40;
 
     const h = 1.0;
     const p = 0.5;
 
-    let positions = [];
-    let normals = [];
-    let indices = [];
+    let positions  = [];
+    let normals    = [];
+    let tangents   = [];
+    let texCoords  = [];
+    let indices    = [];
 
     // Build grid of vertices
     for (let j = 0; j <= vSeg; j++) {
@@ -137,20 +171,31 @@ function CreateSurfaceData(uSeg, vSeg) {
             let [x, yy, z] = parabolicHummingTopVertex(y, beta, h, p);
             positions.push(x, yy, z);
 
-            // init normals to zero – will accumulate facet normals
+            // Initial normals: zero, will be facet-average later
             normals.push(0.0, 0.0, 0.0);
+
+            // Tangent: derivative wrt beta at fixed y
+            // r does not depend on beta, so:
+            let rBase = Math.abs(y) - h;
+            let r = (rBase * rBase) / (2 * p);
+            let tx = -r * Math.sin(beta);
+            let ty = 0.0;
+            let tz =  r * Math.cos(beta);
+            tangents.push(tx, ty, tz);
+
+            // Simple UV mapping: (u,v) from param domain
+            texCoords.push(u, v);
         }
     }
 
     const vertsPerRow = uSeg + 1;
 
-    // Helper: add one triangle and accumulate facet-average normal
+    // Helper: accumulate facet normals (facet average)
     function addFace(i0, i1, i2) {
         const ax = positions[3 * i0], ay = positions[3 * i0 + 1], az = positions[3 * i0 + 2];
         const bx = positions[3 * i1], by = positions[3 * i1 + 1], bz = positions[3 * i1 + 2];
         const cx = positions[3 * i2], cy = positions[3 * i2 + 1], cz = positions[3 * i2 + 2];
 
-        // edges
         const ux = bx - ax, uy = by - ay, uz = bz - az;
         const vx = cx - ax, vy = cy - ay, vz = cz - az;
 
@@ -159,16 +204,13 @@ function CreateSurfaceData(uSeg, vSeg) {
         let ny = uz * vx - ux * vz;
         let nz = ux * vy - uy * vx;
 
-        // ----- FACET AVERAGE NORMAL -----
-        // normalize face normal first (direction only), then accumulate to vertices
+        // normalize face normal before accumulating -> facet average
         let len = Math.hypot(nx, ny, nz);
         if (len > 1e-6) {
-            nx /= len;
-            ny /= len;
-            nz /= len;
+            nx /= len; ny /= len; nz /= len;
         }
 
-        // accumulate
+        // accumulate to vertices
         normals[3 * i0]     += nx;
         normals[3 * i0 + 1] += ny;
         normals[3 * i0 + 2] += nz;
@@ -190,11 +232,11 @@ function CreateSurfaceData(uSeg, vSeg) {
             const i2 = i0 + vertsPerRow;
             const i3 = i2 + 1;
 
-            // triangle 1: (i0, i2, i1)
+            // triangle 1
             indices.push(i0, i2, i1);
             addFace(i0, i2, i1);
 
-            // triangle 2: (i1, i2, i3)
+            // triangle 2
             indices.push(i1, i2, i3);
             addFace(i1, i2, i3);
         }
@@ -211,14 +253,45 @@ function CreateSurfaceData(uSeg, vSeg) {
             normals[k + 1] = ny / len;
             normals[k + 2] = nz / len;
         } else {
-            // fallback
             normals[k]     = 0.0;
             normals[k + 1] = 1.0;
             normals[k + 2] = 0.0;
         }
     }
 
-    return { positions, normals, indices };
+    return { positions, normals, tangents, texCoords, indices };
+}
+
+/*======================  TEXTURE LOADING  ======================*/
+
+function loadTexture(url) {
+    const texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+
+    // Temporary 1x1 pixel until image loads
+    const tempPixel = new Uint8Array([128, 128, 128, 255]);
+    gl.texImage2D(
+        gl.TEXTURE_2D, 0, gl.RGBA,
+        1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+        tempPixel
+    );
+
+    const image = new Image();
+    image.onload = function () {
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.texImage2D(
+            gl.TEXTURE_2D, 0, gl.RGBA,
+            gl.RGBA, gl.UNSIGNED_BYTE, image
+        );
+        gl.generateMipmap(gl.TEXTURE_2D);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+    };
+    image.src = url;
+
+    return texture;
 }
 
 /*======================  DRAW  ======================*/
@@ -227,7 +300,7 @@ function draw() {
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-    // Projection (single point perspective)
+    // Projection (perspective)
     let projection = m4.perspective(Math.PI / 8, 1, 2, 20);
 
     // View
@@ -243,7 +316,7 @@ function draw() {
     gl.uniformMatrix4fv(shProgram.iModelViewMatrix, false, matAccum1);
     gl.uniformMatrix4fv(shProgram.iProjectionMatrix, false, projection);
 
-    // Rotating light position in model space (circle around Y axis)
+    // Rotating light position in model space (circle around top)
     const lightRadius = 5.0;
     const lightHeight = 2.0;
     const lightSpeed = 0.5; // radians per second
@@ -255,18 +328,31 @@ function draw() {
         lightRadius * Math.sin(angle)
     ];
 
-    // Transform light position to eye space using ModelView matrix
+    // Transform light to eye space
     let lightPosEye = transformPoint(matAccum1, lightPosModel);
     gl.uniform3fv(shProgram.iLightPos, new Float32Array(lightPosEye));
 
-    // Draw the surface
+    // Bind textures to texture units
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, diffuseTex);
+    gl.uniform1i(shProgram.iDiffuseMap, 0);
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, normalTex);
+    gl.uniform1i(shProgram.iNormalMap, 1);
+
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, specularTex);
+    gl.uniform1i(shProgram.iSpecularMap, 2);
+
+    // Draw surface
     surface.Draw();
 }
 
 /*======================  ANIMATION LOOP  ======================*/
 
 function animate(time) {
-    currentTime = time * 0.001; // ms → seconds
+    currentTime = time * 0.001; // ms -> s
     draw();
     requestAnimationFrame(animate);
 }
@@ -276,12 +362,14 @@ function animate(time) {
 function initGL() {
     let prog = createProgram(gl, vertexShaderSource, fragmentShaderSource);
 
-    shProgram = new ShaderProgram('Phong', prog);
+    shProgram = new ShaderProgram('TexturedPhong', prog);
     shProgram.Use();
 
     // Attributes
-    shProgram.iAttribVertex = gl.getAttribLocation(prog, "vertex");
-    shProgram.iAttribNormal = gl.getAttribLocation(prog, "normal");
+    shProgram.iAttribVertex   = gl.getAttribLocation(prog, "vertex");
+    shProgram.iAttribNormal   = gl.getAttribLocation(prog, "normal");
+    shProgram.iAttribTexCoord = gl.getAttribLocation(prog, "texCoord");
+    shProgram.iAttribTangent  = gl.getAttribLocation(prog, "tangent");
 
     // Uniforms
     shProgram.iModelViewMatrix  = gl.getUniformLocation(prog, "ModelViewMatrix");
@@ -293,10 +381,14 @@ function initGL() {
     shProgram.iSpecularColor = gl.getUniformLocation(prog, "uSpecularColor");
     shProgram.iShininess     = gl.getUniformLocation(prog, "uShininess");
 
-    // Lighting constants (you can tweak)
-    gl.uniform3fv(shProgram.iAmbientColor,  new Float32Array([0.1, 0.1, 0.15]));
-    gl.uniform3fv(shProgram.iDiffuseColor,  new Float32Array([0.3, 0.6, 0.9]));
-    gl.uniform3fv(shProgram.iSpecularColor, new Float32Array([0.9, 0.9, 0.9]));
+    shProgram.iDiffuseMap  = gl.getUniformLocation(prog, "uDiffuseMap");
+    shProgram.iNormalMap   = gl.getUniformLocation(prog, "uNormalMap");
+    shProgram.iSpecularMap = gl.getUniformLocation(prog, "uSpecularMap");
+
+    // Lighting constants (can tweak)
+    gl.uniform3fv(shProgram.iAmbientColor,  new Float32Array([0.2, 0.2, 0.2]));
+    gl.uniform3fv(shProgram.iDiffuseColor,  new Float32Array([1.0, 1.0, 1.0]));
+    gl.uniform3fv(shProgram.iSpecularColor, new Float32Array([1.0, 1.0, 1.0]));
     gl.uniform1f(shProgram.iShininess, 32.0);
 
     surface = new Model('ParabolicHummingTop');
@@ -304,9 +396,14 @@ function initGL() {
     gl.enable(gl.DEPTH_TEST);
     gl.enable(gl.CULL_FACE);
     gl.cullFace(gl.BACK);
+
+    // Load textures
+    diffuseTex  = loadTexture("./textures/diffuse.png");
+    normalTex   = loadTexture("./textures/normal.png");
+    specularTex = loadTexture("./textures/specular.png");
 }
 
-/*======================  SHADER CREATION – UNCHANGED LOGIC  ======================*/
+/*======================  SHADER CREATION  ======================*/
 
 function createProgram(gl, vShader, fShader) {
     let vsh = gl.createShader(gl.VERTEX_SHADER);
@@ -360,7 +457,7 @@ function init() {
 
     spaceball = new TrackballRotator(canvas, draw, 0);
 
-    // Hook up sliders for U/V granularity
+    // Sliders from PA#2
     const uSlider = document.getElementById("uResolution");
     const vSlider = document.getElementById("vResolution");
     const uVal = document.getElementById("uVal");
@@ -374,7 +471,13 @@ function init() {
         vVal.textContent = vSeg.toString();
 
         const data = CreateSurfaceData(uSeg, vSeg);
-        surface.BufferData(data.positions, data.normals, data.indices);
+        surface.BufferData(
+            data.positions,
+            data.normals,
+            data.tangents,
+            data.texCoords,
+            data.indices
+        );
 
         draw();
     }

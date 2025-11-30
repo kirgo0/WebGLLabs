@@ -2,61 +2,108 @@
 const vertexShaderSource = `
 attribute vec3 vertex;
 attribute vec3 normal;
+attribute vec2 texCoord;
+attribute vec3 tangent;
 
 uniform mat4 ModelViewMatrix;
 uniform mat4 ProjectionMatrix;
 
-varying vec3 vNormal;
-varying vec3 vPosition;
+varying vec3 vPosition;   // position in eye space
+varying vec2 vTexCoord;
+varying vec3 vT;
+varying vec3 vB;
+varying vec3 vN;
 
 void main() {
-    // Position in eye space
     vec4 posEye = ModelViewMatrix * vec4(vertex, 1.0);
     vPosition = posEye.xyz;
+    vTexCoord = texCoord;
 
-    // Transform normal to eye space (no non-uniform scale, so mat3 is OK)
-    vNormal = mat3(ModelViewMatrix) * normal;
+    mat3 MV3 = mat3(ModelViewMatrix);
+
+    // Transform normal and tangent to eye space
+    vec3 T = MV3 * tangent;
+    vec3 N = MV3 * normal;
+
+    // === Gram–Schmidt, giving PRIORITY to tangent ===
+    // First, normalize tangent -> primary basis vector
+    T = normalize(T);
+
+    // Then make normal orthogonal to tangent
+    N = normalize(N - T * dot(N, T));
+
+    // Bitangent completes TBN
+    vec3 B = cross(N, T);
+
+    vT = T;
+    vB = B;
+    vN = N;
 
     gl_Position = ProjectionMatrix * posEye;
 }`;
 
 
-// Fragment shader (Phong shading)
+// Fragment shader
 const fragmentShaderSource = `
 #ifdef GL_FRAGMENT_PRECISION_HIGH
-   precision highp float;
+precision highp float;
 #else
-   precision mediump float;
+precision mediump float;
 #endif
 
-varying vec3 vNormal;
 varying vec3 vPosition;
+varying vec2 vTexCoord;
+varying vec3 vT;
+varying vec3 vB;
+varying vec3 vN;
 
-uniform vec3 uLightPos;       // light position in eye space
+uniform vec3 uLightPos;      // light position in eye space
+
+uniform sampler2D uDiffuseMap;
+uniform sampler2D uNormalMap;
+uniform sampler2D uSpecularMap;
+
 uniform vec3 uAmbientColor;
 uniform vec3 uDiffuseColor;
 uniform vec3 uSpecularColor;
 uniform float uShininess;
 
 void main() {
-    vec3 N = normalize(vNormal);
+    // Build TBN matrix (eye space)
+    vec3 T = normalize(vT);
+    vec3 B = normalize(vB);
+    vec3 N = normalize(vN);
+    mat3 TBN = mat3(T, B, N);
+
+    // Normal from normal map (tangent space -> eye space)
+    vec3 nTex = texture2D(uNormalMap, vTexCoord).rgb;
+    nTex = nTex * 2.0 - 1.0;   // [0,1] -> [-1,1]
+    vec3 Neye = normalize(TBN * nTex);
+
+    // Lighting vectors
     vec3 L = normalize(uLightPos - vPosition);
+    float lambert = max(dot(Neye, L), 0.0);
 
-    // Diffuse term
-    float lambert = max(dot(N, L), 0.0);
-
-    // Specular term (Phong) – viewer direction approximated as (0,0,1)
-    // as suggested in the task
+    // Viewer direction approximation (0,0,1) as in assignment
     vec3 V = vec3(0.0, 0.0, 1.0);
-    vec3 R = reflect(-L, N);
+    vec3 R = reflect(-L, Neye);
     float spec = 0.0;
     if (lambert > 0.0) {
         spec = pow(max(dot(R, V), 0.0), uShininess);
     }
 
-    vec3 color = uAmbientColor +
-                 uDiffuseColor * lambert +
-                 uSpecularColor * spec;
+    // Sample textures
+    vec3 texDiffuse   = texture2D(uDiffuseMap,   vTexCoord).rgb;
+    float texSpecular = texture2D(uSpecularMap, vTexCoord).r;
+
+    // Final color:
+    //    diffuse texture modulates diffuse term,
+    //    specular texture modulates specular term,
+    //    normal texture already used via Neye
+    vec3 color =
+        uAmbientColor * texDiffuse +                      // ambient (tinted by diffuse tex)
+        uDiffuseColor * lambert * texDiffuse +            // diffuse * diffuse texture
+        uSpecularColor * spec * texSpecular;              // specular * specular texture
 
     gl_FragColor = vec4(color, 1.0);
 }`;
