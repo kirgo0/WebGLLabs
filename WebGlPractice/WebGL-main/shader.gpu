@@ -15,24 +15,24 @@ varying vec3 vB;
 varying vec3 vN;
 
 void main() {
+    // Position in eye space
     vec4 posEye = ModelViewMatrix * vec4(vertex, 1.0);
     vPosition = posEye.xyz;
     vTexCoord = texCoord;
 
-    mat3 MV3 = mat3(ModelViewMatrix);
-
     // Transform normal and tangent to eye space
+    mat3 MV3 = mat3(ModelViewMatrix);
     vec3 T = MV3 * tangent;
     vec3 N = MV3 * normal;
 
-    // === Gram–Schmidt, giving PRIORITY to tangent ===
-    // First, normalize tangent -> primary basis vector
+    // ===== Gram–Schmidt with TANGENT priority =====
+    // 1. Normalize tangent – головний вектор базису
     T = normalize(T);
 
-    // Then make normal orthogonal to tangent
+    // 2. Робимо нормаль ортогональною до тангента
     N = normalize(N - T * dot(N, T));
 
-    // Bitangent completes TBN
+    // 3. Бінормаль як векторний добуток
     vec3 B = cross(N, T);
 
     vT = T;
@@ -57,7 +57,7 @@ varying vec3 vT;
 varying vec3 vB;
 varying vec3 vN;
 
-uniform vec3 uLightPos;      // light position in eye space
+uniform vec3 uLightPos;
 
 uniform sampler2D uDiffuseMap;
 uniform sampler2D uNormalMap;
@@ -68,6 +68,11 @@ uniform vec3 uDiffuseColor;
 uniform vec3 uSpecularColor;
 uniform float uShininess;
 
+// === Texture transform uniforms ===
+uniform vec2 uTexCenter;    // pivot in (u,v)
+uniform float uTexScale;    // uniform scale
+uniform float uTexRotation; // rotation in radians
+
 void main() {
     // Build TBN matrix (eye space)
     vec3 T = normalize(vT);
@@ -75,35 +80,51 @@ void main() {
     vec3 N = normalize(vN);
     mat3 TBN = mat3(T, B, N);
 
-    // Normal from normal map (tangent space -> eye space)
-    vec3 nTex = texture2D(uNormalMap, vTexCoord).rgb;
+    // --- Texture coordinate transform: scale + rotate around uTexCenter ---
+    vec2 uv = vTexCoord;
+
+    // shift to pivot
+    uv -= uTexCenter;
+
+    // scale
+    uv *= uTexScale;
+
+    // rotate
+    float c = cos(uTexRotation);
+    float s = sin(uTexRotation);
+    mat2 R = mat2(c, -s,
+                  s,  c);
+    uv = R * uv;
+
+    // shift back
+    uv += uTexCenter;
+
+    // 1) Normal from normal map (tangent space -> eye space)
+    vec3 nTex = texture2D(uNormalMap, uv).rgb;
     nTex = nTex * 2.0 - 1.0;   // [0,1] -> [-1,1]
     vec3 Neye = normalize(TBN * nTex);
 
-    // Lighting vectors
+    // 2) Lighting vectors
     vec3 L = normalize(uLightPos - vPosition);
     float lambert = max(dot(Neye, L), 0.0);
 
-    // Viewer direction approximation (0,0,1) as in assignment
+    // viewer direction approximation (0,0,1)
     vec3 V = vec3(0.0, 0.0, 1.0);
-    vec3 R = reflect(-L, Neye);
+    vec3 Rv = reflect(-L, Neye);
     float spec = 0.0;
     if (lambert > 0.0) {
-        spec = pow(max(dot(R, V), 0.0), uShininess);
+        spec = pow(max(dot(Rv, V), 0.0), uShininess);
     }
 
-    // Sample textures
-    vec3 texDiffuse   = texture2D(uDiffuseMap,   vTexCoord).rgb;
-    float texSpecular = texture2D(uSpecularMap, vTexCoord).r;
+    // 3) Sample textures with transformed uv
+    vec3 texDiffuse   = texture2D(uDiffuseMap,  uv).rgb;
+    float texSpecular = texture2D(uSpecularMap, uv).r;
 
-    // Final color:
-    //    diffuse texture modulates diffuse term,
-    //    specular texture modulates specular term,
-    //    normal texture already used via Neye
+    // 4) Final color
     vec3 color =
-        uAmbientColor * texDiffuse +                      // ambient (tinted by diffuse tex)
-        uDiffuseColor * lambert * texDiffuse +            // diffuse * diffuse texture
-        uSpecularColor * spec * texSpecular;              // specular * specular texture
+        uAmbientColor * texDiffuse +
+        uDiffuseColor * lambert * texDiffuse +
+        uSpecularColor * spec * texSpecular;
 
     gl_FragColor = vec4(color, 1.0);
 }`;

@@ -10,6 +10,10 @@ let currentTime = 0.0;  // For rotating light
 let diffuseTex = null;
 let normalTex = null;
 let specularTex = null;
+let texCenterU = 0.5;
+let texCenterV = 0.5;
+let texScale = 1.0;
+let texRotation = 0.0; // radians
 
 function deg2rad(angle) {
     return angle * Math.PI / 180;
@@ -19,8 +23,8 @@ function deg2rad(angle) {
 function transformPoint(m, p) {
     const x = p[0], y = p[1], z = p[2];
     return [
-        m[0] * x + m[4] * y + m[8]  * z + m[12],
-        m[1] * x + m[5] * y + m[9]  * z + m[13],
+        m[0] * x + m[4] * y + m[8] * z + m[12],
+        m[1] * x + m[5] * y + m[9] * z + m[13],
         m[2] * x + m[6] * y + m[10] * z + m[14]
     ];
 }
@@ -102,22 +106,22 @@ function ShaderProgram(name, program) {
     this.name = name;
     this.prog = program;
 
-    this.iAttribVertex    = -1;
-    this.iAttribNormal    = -1;
-    this.iAttribTexCoord  = -1;
-    this.iAttribTangent   = -1;
+    this.iAttribVertex = -1;
+    this.iAttribNormal = -1;
+    this.iAttribTexCoord = -1;
+    this.iAttribTangent = -1;
 
     this.iModelViewMatrix = -1;
     this.iProjectionMatrix = -1;
 
-    this.iLightPos      = -1;
-    this.iAmbientColor  = -1;
-    this.iDiffuseColor  = -1;
+    this.iLightPos = -1;
+    this.iAmbientColor = -1;
+    this.iDiffuseColor = -1;
     this.iSpecularColor = -1;
-    this.iShininess     = -1;
+    this.iShininess = -1;
 
-    this.iDiffuseMap  = -1;
-    this.iNormalMap   = -1;
+    this.iDiffuseMap = -1;
+    this.iNormalMap = -1;
     this.iSpecularMap = -1;
 
     this.Use = function () {
@@ -153,11 +157,11 @@ function CreateSurfaceData(uSeg, vSeg) {
     const h = 1.0;
     const p = 0.5;
 
-    let positions  = [];
-    let normals    = [];
-    let tangents   = [];
-    let texCoords  = [];
-    let indices    = [];
+    let positions = [];
+    let normals = [];
+    let tangents = [];
+    let texCoords = [];
+    let indices = [];
 
     // Build grid of vertices
     for (let j = 0; j <= vSeg; j++) {
@@ -180,7 +184,7 @@ function CreateSurfaceData(uSeg, vSeg) {
             let r = (rBase * rBase) / (2 * p);
             let tx = -r * Math.sin(beta);
             let ty = 0.0;
-            let tz =  r * Math.cos(beta);
+            let tz = r * Math.cos(beta);
             tangents.push(tx, ty, tz);
 
             // Simple UV mapping: (u,v) from param domain
@@ -211,15 +215,15 @@ function CreateSurfaceData(uSeg, vSeg) {
         }
 
         // accumulate to vertices
-        normals[3 * i0]     += nx;
+        normals[3 * i0] += nx;
         normals[3 * i0 + 1] += ny;
         normals[3 * i0 + 2] += nz;
 
-        normals[3 * i1]     += nx;
+        normals[3 * i1] += nx;
         normals[3 * i1 + 1] += ny;
         normals[3 * i1 + 2] += nz;
 
-        normals[3 * i2]     += nx;
+        normals[3 * i2] += nx;
         normals[3 * i2 + 1] += ny;
         normals[3 * i2 + 2] += nz;
     }
@@ -249,11 +253,11 @@ function CreateSurfaceData(uSeg, vSeg) {
         let nz = normals[k + 2];
         let len = Math.hypot(nx, ny, nz);
         if (len > 1e-6) {
-            normals[k]     = nx / len;
+            normals[k] = nx / len;
             normals[k + 1] = ny / len;
             normals[k + 2] = nz / len;
         } else {
-            normals[k]     = 0.0;
+            normals[k] = 0.0;
             normals[k + 1] = 1.0;
             normals[k + 2] = 0.0;
         }
@@ -345,7 +349,11 @@ function draw() {
     gl.bindTexture(gl.TEXTURE_2D, specularTex);
     gl.uniform1i(shProgram.iSpecularMap, 2);
 
-    // Draw surface
+    // Update texture transform uniforms each frame
+    gl.uniform2f(shProgram.iTexCenter, texCenterU, texCenterV);
+    gl.uniform1f(shProgram.iTexScale, texScale);
+    gl.uniform1f(shProgram.iTexRotation, texRotation);
+
     surface.Draw();
 }
 
@@ -366,28 +374,35 @@ function initGL() {
     shProgram.Use();
 
     // Attributes
-    shProgram.iAttribVertex   = gl.getAttribLocation(prog, "vertex");
-    shProgram.iAttribNormal   = gl.getAttribLocation(prog, "normal");
+    shProgram.iAttribVertex = gl.getAttribLocation(prog, "vertex");
+    shProgram.iAttribNormal = gl.getAttribLocation(prog, "normal");
     shProgram.iAttribTexCoord = gl.getAttribLocation(prog, "texCoord");
-    shProgram.iAttribTangent  = gl.getAttribLocation(prog, "tangent");
+    shProgram.iAttribTangent = gl.getAttribLocation(prog, "tangent");
 
     // Uniforms
-    shProgram.iModelViewMatrix  = gl.getUniformLocation(prog, "ModelViewMatrix");
+    shProgram.iModelViewMatrix = gl.getUniformLocation(prog, "ModelViewMatrix");
     shProgram.iProjectionMatrix = gl.getUniformLocation(prog, "ProjectionMatrix");
 
-    shProgram.iLightPos      = gl.getUniformLocation(prog, "uLightPos");
-    shProgram.iAmbientColor  = gl.getUniformLocation(prog, "uAmbientColor");
-    shProgram.iDiffuseColor  = gl.getUniformLocation(prog, "uDiffuseColor");
+    shProgram.iLightPos = gl.getUniformLocation(prog, "uLightPos");
+    shProgram.iAmbientColor = gl.getUniformLocation(prog, "uAmbientColor");
+    shProgram.iDiffuseColor = gl.getUniformLocation(prog, "uDiffuseColor");
     shProgram.iSpecularColor = gl.getUniformLocation(prog, "uSpecularColor");
-    shProgram.iShininess     = gl.getUniformLocation(prog, "uShininess");
+    shProgram.iShininess = gl.getUniformLocation(prog, "uShininess");
 
-    shProgram.iDiffuseMap  = gl.getUniformLocation(prog, "uDiffuseMap");
-    shProgram.iNormalMap   = gl.getUniformLocation(prog, "uNormalMap");
+    shProgram.iTexCenter = gl.getUniformLocation(prog, "uTexCenter");
+    shProgram.iTexScale = gl.getUniformLocation(prog, "uTexScale");
+    shProgram.iTexRotation = gl.getUniformLocation(prog, "uTexRotation");
+
+    shProgram.iDiffuseMap = gl.getUniformLocation(prog, "uDiffuseMap");
+    shProgram.iNormalMap = gl.getUniformLocation(prog, "uNormalMap");
     shProgram.iSpecularMap = gl.getUniformLocation(prog, "uSpecularMap");
 
+    gl.uniform2f(shProgram.iTexCenter, texCenterU, texCenterV);
+    gl.uniform1f(shProgram.iTexScale, texScale);
+    gl.uniform1f(shProgram.iTexRotation, texRotation);
     // Lighting constants (can tweak)
-    gl.uniform3fv(shProgram.iAmbientColor,  new Float32Array([0.2, 0.2, 0.2]));
-    gl.uniform3fv(shProgram.iDiffuseColor,  new Float32Array([1.0, 1.0, 1.0]));
+    gl.uniform3fv(shProgram.iAmbientColor, new Float32Array([0.2, 0.2, 0.2]));
+    gl.uniform3fv(shProgram.iDiffuseColor, new Float32Array([1.0, 1.0, 1.0]));
     gl.uniform3fv(shProgram.iSpecularColor, new Float32Array([1.0, 1.0, 1.0]));
     gl.uniform1f(shProgram.iShininess, 32.0);
 
@@ -398,8 +413,8 @@ function initGL() {
     gl.cullFace(gl.BACK);
 
     // Load textures
-    diffuseTex  = loadTexture("./textures/diffuse.png");
-    normalTex   = loadTexture("./textures/normal.png");
+    diffuseTex = loadTexture("./textures/diffuse.png");
+    normalTex = loadTexture("./textures/normal.png");
     specularTex = loadTexture("./textures/specular.png");
 }
 
@@ -486,6 +501,63 @@ function init() {
     vSlider.oninput = updateSurfaceFromSliders;
 
     updateSurfaceFromSliders();
+
+    function onKeyDown(e) {
+        const stepUV = 0.02;          // movement step in UV
+        const stepRot = deg2rad(5.0);  // rotation step
+        const scaleMul = 1.05;          // scaling factor per step
+
+        switch (e.key) {
+            // Move pivot along U (left/right)
+            case 'a':
+            case 'A':
+                texCenterU -= stepUV;
+                break;
+            case 'd':
+            case 'D':
+                texCenterU += stepUV;
+                break;
+
+            // Move pivot along V (up/down)
+            case 'w':
+            case 'W':
+                texCenterV += stepUV;
+                break;
+            case 's':
+            case 'S':
+                texCenterV -= stepUV;
+                break;
+
+            case 'q':
+            case 'Q':
+                texRotation -= stepRot;
+                break;
+            case 'e':
+            case 'E':
+                texRotation += stepRot;
+                break;
+
+            case 'z':
+            case 'Z':
+                texScale /= scaleMul; // zoom out
+                break;
+            case 'x':
+            case 'X':
+                texScale *= scaleMul; // zoom in
+                break;
+
+            default:
+                return; // do nothing for other keys
+        }
+
+        // Clamp pivot to [0,1]
+        texCenterU = Math.max(0.0, Math.min(1.0, texCenterU));
+        texCenterV = Math.max(0.0, Math.min(1.0, texCenterV));
+
+        texScale = Math.max(0.05, Math.min(20.0, texScale));
+    }
+
+    window.addEventListener('keydown', onKeyDown);
 
     requestAnimationFrame(animate);
 }
